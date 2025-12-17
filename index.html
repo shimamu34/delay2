@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chromebook向け｜遅延映像＋骨格表示（完全版）</title>
+
+<!-- TensorFlow.js & MoveNet（必須） -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+<style>
+  :root { --bg:#000; --fg:#fff; --ui:#1f2937; --accent:#22c55e; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--fg); height:100%; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  #view { flex:1; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100%; max-height:100%; touch-action:none; }
+  #panel {
+    background:rgba(31,41,55,.9);
+    padding:8px 10px;
+    display:grid;
+    grid-template-columns: 1fr 1fr auto auto auto;
+    gap:8px; align-items:center;
+    font-size:14px;
+    min-height:56px;           /* ★ iPad横向き対策 */
+    box-sizing:border-box;
+  }
+  label { display:flex; align-items:center; gap:6px; }
+  input[type=range] { width:100%; min-width:120px; }
+  button { background:#111827; color:#fff; border:1px solid #374151; padding:6px 10px; border-radius:6px; }
+  button.accent { border-color:var(--accent); color:var(--accent); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="view"><canvas id="canvas"></canvas></div>
+  <div id="panel">
+    <label>遅延 <strong><span id="dsec">5</span>s</strong>
+      <input id="delay" type="range" min="1" max="20" step="1" value="5" />
+    </label>
+    <label>FPS <strong><span id="fpsv">15</span></strong>
+      <input id="fps" type="range" min="10" max="24" step="1" value="15" />
+    </label>
+    <button id="skel">骨格ON</button>
+    <button id="fs">全画面</button>
+    <button id="start" class="accent">開始</button>
+  </div>
+</div>
+
+<video id="video" playsinline muted style="display:none"></video>
+
+<script>
+// ================= 設定 =================
+let delaySeconds = 5;
+let targetFPS = 15;
+const MAX_W = 1280;
+
+// ================= DOM =================
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
+
+const delayInput = document.getElementById('delay');
+const fpsInput = document.getElementById('fps');
+const dsec = document.getElementById('dsec');
+const fpsv = document.getElementById('fpsv');
+const fsBtn = document.getElementById('fs');
+const startBtn = document.getElementById('start');
+const skelBtn = document.getElementById('skel');
+
+// ================= 状態 =================
+let running = false;
+let showSkeleton = false;
+let detector = null;
+let buffer = [];
+let delayFrames = delaySeconds * targetFPS;
+let lastTick = 0;
+
+// ================= UI =================
+delayInput.oninput = () => {
+  delaySeconds = +delayInput.value;
+  dsec.textContent = delaySeconds;
+  delayFrames = delaySeconds * targetFPS;
+};
+
+fpsInput.oninput = () => {
+  targetFPS = +fpsInput.value;
+  fpsv.textContent = targetFPS;
+  delayFrames = delaySeconds * targetFPS;
+};
+
+fsBtn.onclick = () => {
+  if (!document.fullscreenElement) canvas.requestFullscreen();
+  else document.exitFullscreen();
+};
+
+skelBtn.onclick = () => {
+  showSkeleton = !showSkeleton;
+  skelBtn.textContent = showSkeleton ? '骨格OFF' : '骨格ON';
+};
+
+startBtn.onclick = async () => {
+  if (running) return;
+  startBtn.textContent = '起動中…';
+  await startCamera();
+  await initPose();
+  running = true;
+  startBtn.textContent = '稼働中';
+  tick(0);
+};
+
+// ================= カメラ =================
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'environment' }, // ★ 背面カメラ優先（iPad対応）
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: targetFPS }
+    },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+
+  let w = video.videoWidth;
+  let h = video.videoHeight;
+  if (w > MAX_W) {
+    const r = MAX_W / w;
+    w = Math.round(w * r);
+    h = Math.round(h * r);
+  }
+  canvas.width = w;
+  canvas.height = h;
+}
+
+// ================= MoveNet =================
+async function initPose() {
+  const model = poseDetection.SupportedModels.MoveNet;
+  detector = await poseDetection.createDetector(model, {
+    modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+  });
+}
+
+function drawSkeleton(keypoints) {
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 3;
+  const pairs = poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet);
+  pairs.forEach(([i, j]) => {
+    const a = keypoints[i];
+    const b = keypoints[j];
+    if (a.score > 0.4 && b.score > 0.4) {
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+  });
+}
+
+// ================= メインループ =================
+async function tick(t) {
+  if (!running) return;
+  const interval = 1000 / targetFPS;
+
+  if (t - lastTick >= interval) {
+    lastTick = t;
+
+    try {
+      const bmp = await createImageBitmap(video);
+      buffer.push(bmp);
+    } catch(e) {}
+
+    if (buffer.length > delayFrames) {
+      const out = buffer.shift();
+      ctx.drawImage(out, 0, 0, canvas.width, canvas.height);
+
+      if (showSkeleton && detector) {
+        detector.estimatePoses(canvas).then(poses => {
+          if (poses[0]) drawSkeleton(poses[0].keypoints);
+        });
+      }
+
+      out.close && out.close();
+    }
+
+    if (buffer.length > delayFrames * 2) {
+      while (buffer.length > delayFrames) {
+        const b = buffer.shift();
+        b.close && b.close();
+      }
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+fpsv.textContent = targetFPS;
+dsec.textContent = delaySeconds;
+</script>
+</body>
+</html>
