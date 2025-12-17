@@ -13,17 +13,26 @@
   :root { --bg:#000; --fg:#fff; --ui:#1f2937; --accent:#22c55e; }
   html, body { margin:0; padding:0; background:var(--bg); color:var(--fg); height:100%; }
   #wrap { display:flex; flex-direction:column; height:100%; }
-  #view { flex:1; display:flex; align-items:center; justify-content:center; }
+  #view {
+  flex:1;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;            /* ★ Safariリサイズ対策 */
+}
   canvas { max-width:100%; max-height:100%; touch-action:none; }
   #panel {
     background:rgba(31,41,55,.9);
     padding:8px 10px;
-    display:grid;
-    grid-template-columns: 1fr 1fr auto auto auto;
+    display:flex;              /* ★ grid→flex（iPad安定） */
+    flex-wrap:wrap;            /* ★ 画面縮小でも消えない */
     gap:8px; align-items:center;
     font-size:14px;
-    min-height:56px;           /* ★ iPad横向き対策 */
+    min-height:56px;
     box-sizing:border-box;
+    position:sticky;           /* ★ Safari UI変化でも保持 */
+    bottom:0;
+    z-index:10;
   }
   label { display:flex; align-items:center; gap:6px; }
   input[type=range] { width:100%; min-width:120px; }
@@ -102,10 +111,21 @@ skelBtn.onclick = () => {
 startBtn.onclick = async () => {
   if (running) return;
   startBtn.textContent = '起動中…';
+
+  // ★ iPad Safari のUI変化対策：先にレイアウト確定
+  document.body.style.height = window.innerHeight + 'px';
+
   await startCamera();
   await initPose();
+
   running = true;
   startBtn.textContent = '稼働中';
+
+  // ★ 起動後に再計算（スライダー消失防止）
+  requestAnimationFrame(() => {
+    document.body.style.height = window.innerHeight + 'px';
+  });
+
   tick(0);
 };
 
